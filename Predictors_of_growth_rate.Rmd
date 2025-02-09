@@ -1,0 +1,182 @@
+---
+title: "Predictors_of_growth_rate"
+output: github_document
+---
+**Machine learning to predict minimum doubling time of microbes using phenotypic traits**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(caret)
+library(regclass)
+library(GGally)
+library(DALEX)
+traits <- read.csv("~/Documents/Thermophillic_ideas/condensed_traits_NCBI.csv")
+
+#select relevant column and filter out those with no phylum
+traits_norm <- traits %>%
+  filter(!is.na(phylum)) %>%
+  select(phylum, species, doubling_h, genome_size, gc_content, coding_genes, optimum_tmp, optimum_ph, growth_tmp, rRNA16S_genes, tRNA_genes) %>%
+  group_by(species) %>%
+  mutate(across(everything(), ~ifelse(is.na(.), median(., na.rm = TRUE), .))) %>%
+  filter(across(c(doubling_h, optimum_ph, coding_genes, rRNA16S_genes, tRNA_genes, growth_tmp, optimum_tmp), ~!is.na(.)))%>%
+  ungroup()
+  
+#check for any NAs present
+unlist(lapply(traits_norm,function(x)sum(is.na(x))))
+
+####
+seed <- 577
+set.seed(seed)
+
+# Define proportions
+train_ratio <- 0.7
+# use stratified sampling for train/test split to inherent the distribution of the datasets
+train_indices <- createDataPartition(traits_norm$phylum, p = train_ratio, list = FALSE)
+train_data <- traits_norm[train_indices, ]
+holdout_data <- traits_norm[-train_indices, ]
+
+# Check data distribution
+table(train_data$phylum) / nrow(train_data) # Proportions in train
+table(holdout_data$phylum) / nrow(holdout_data)   # Proportions in test
+
+TRAIN <- train_data %>%
+  select(-phylum, -species)
+
+HOLDOUT <- holdout_data %>%
+   select(-phylum, -species)
+
+  
+## cross validation
+fitControl <- trainControl(method = "cv", number = 5) # cv is 5 crossvalidation
+
+## Multiple Linear Regression using all the predictors
+set.seed(seed); LM <- train(doubling_h ~.,
+                            data = TRAIN,
+                            method = "glm",
+                            trControl = fitControl,
+                            preProc = c("center", "scale"))
+
+
+
+## Ridge regression
+glmnetGrid <- expand.grid(alpha = 0, lambda = 10^seq(-4, 2, by = 0.5))
+set.seed(seed); Ridge <- train(doubling_h~.,
+                                data= TRAIN,
+                                method='glmnet',
+                                trControl=fitControl,
+                                tuneGrid=glmnetGrid,
+                                preProc=c("center", "scale") )
+
+
+## Lasso Regression
+glmnetGrid <- expand.grid(alpha = 1,lambda = 10^seq(-4, 2,by=0.5))
+set.seed(seed); Lasso <- train(doubling_h~.,
+                                data= TRAIN,
+                                method='glmnet',
+                                trControl=fitControl,
+                                tuneGrid=glmnetGrid,
+                                preProc=c("center", "scale") )
+
+## Elastic net Regression
+glmnetGrid <- expand.grid(alpha = seq(0.1,0.9,by=0.1),lambda = 10^seq(-4,2,by= 0.5))
+set.seed(seed); Elastic_net <- train(doubling_h~.,
+                                data= TRAIN,
+                                method='glmnet',
+                                trControl=fitControl,
+                                tuneGrid=glmnetGrid,
+                                preProc=c("center", "scale") )
+
+## Principal component Analysis
+PCRGrid <- expand.grid(ncomp=c(1:9))
+set.seed(seed); PCR <- train(doubling_h~.,
+                                data= TRAIN,
+                                method='pcr',
+                                trControl=fitControl,
+                                tuneGrid=PCRGrid,
+                                preProc=c("center", "scale") )
+
+##Partial least square Regression
+PLSGrid <- expand.grid(ncomp=c(1:9))
+set.seed(seed); PLS <- train(doubling_h ~.,
+                                data= TRAIN,
+                                method='pls',
+                                trControl=fitControl,
+                                tuneGrid=PLSGrid,
+                                preProc=c("center", "scale") )
+
+##K_Nearest Neighbors
+knnGrid <- expand.grid(k = c(1:25))
+set.seed(seed); KNN <- train(doubling_h ~.,
+                                data= TRAIN,
+                                method='knn',
+                                trControl=fitControl,
+                                tuneGrid=knnGrid,
+                                preProc=c("center", "scale") )
+
+
+
+# Performances for all the predictive models
+LM$results[rownames(LM$bestTune),] # vanilla linear model
+postResample(HOLDOUT$doubling_h, predict(LM,newdata=HOLDOUT)) # linear model on holdout 
+
+Ridge$results[rownames(Ridge$bestTune),] # Ridge
+postResample(HOLDOUT$doubling_h,predict(Ridge,newdata=HOLDOUT)) # Ridge model on holdout
+
+Lasso$results[rownames(Lasso$bestTune),] # Lasso
+postResample(HOLDOUT$doubling_h,predict(Lasso,newdata=HOLDOUT)) # Lasso model on holdout
+
+Elastic_net$results[rownames(Elastic_net$bestTune),] # Elastic net
+postResample(HOLDOUT$doubling_h,predict(Elastic_net,newdata=HOLDOUT)) # Elasticnet on holdout
+
+
+ PCR$results[rownames(PCR$bestTune),] # PCR
+postResample(HOLDOUT$doubling_h,predict(PCR,newdata=HOLDOUT)) # PCR on holdout
+
+PLS$results[rownames(PLS$bestTune),] # PLS
+postResample(HOLDOUT$doubling_h,predict(PLS,newdata=HOLDOUT)) # PLS on holdout
+
+KNN$results[rownames(KNN$bestTune),] #KNN
+postResample(HOLDOUT$doubling_h,predict(KNN,newdata=HOLDOUT)) #KNN on holdout
+
+
+#comparing the predicted and the actual values of the holdout samples
+ lm_p <- predict(LM,newdata=HOLDOUT)
+las_p <- predict(Lasso,newdata=HOLDOUT)
+rid_p <- predict(Ridge,newdata=HOLDOUT)
+Enet_p <- predict(Elastic_net,newdata=HOLDOUT)
+pcr_p <- predict(PCR,newdata=HOLDOUT)
+pls_p <- predict(PLS,newdata=HOLDOUT)
+knn_p <- predict(KNN,newdata=HOLDOUT)
+
+all_p <- data.frame(actual = HOLDOUT$doubling_h, lm_p, las_p, rid_p, Enet_p, pcr_p, pls_p, knn_p )
+
+all_plots <- ggpairs(all_p) + theme_bw()
+print(all_plots)
+
+
+# KNN seems to outperform other models
+
+set.seed(577)
+
+# Create an explainer for KNN model
+explainer_knn <- explain(KNN, data = TRAIN[, -which(colnames(TRAIN) == "doubling_h")], 
+                         y = TRAIN$doubling_h, label = "")
+
+# Compute variable importance
+vi_knn_50 <- model_parts(explainer = explainer_knn, 
+                   loss_function = loss_root_mean_square,
+                               B = 50,
+                            type = "difference")
+# Plot variable importance
+plot(vi_knn_50) +
+  ggtitle("KNN model variable-importance", "") 
+
+
+
+
+
+```
+
